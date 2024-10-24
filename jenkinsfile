@@ -1,0 +1,109 @@
+pipeline {
+    agent any
+    
+    tools {
+        maven "maven3"
+    }
+    
+    environment {
+        IMAGE_NAME = 'gouthamc125/hdfc'
+        SCANNER_HOME =tool 'sonar-scanner'
+    }
+    
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag')
+    }
+
+
+    stages {
+        stage('GitCheckout') {
+            steps {
+                git branch: 'development', changelog: false, credentialsId: 'git_cred', poll: false, url: 'https://github.com/gouthamc125/Blue-Green-Deployment.git'
+            }
+        }
+        
+        stage('Compile') {
+            steps {
+                sh "mvn compile"
+            }
+        }
+        
+        stage('Unit Test Cases') {
+            steps {
+                sh "mvn test -DskipTests=true"
+            }
+        }
+        
+        stage('Filesystem Scan') {
+            steps {
+                sh "trivy fs --format table -o trivy_fs.html ."
+            }
+        }
+        
+        stage('Build the code') {
+            steps {
+                sh "mvn package -DskipTests=true"
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                 sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Banking-app -Dsonar.projectKey=Banking-app \
+                    -Dsonar.java.binaries=target'''
+                }
+            }
+        }
+        
+        stage('Build Image $ Tag') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
+                        sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+                    }
+                }
+            }
+        }
+        
+        stage('Scan Image') {
+            steps {
+                sh "trivy image --format table -o trivy_image.html ${IMAGE_NAME}:${IMAGE_TAG}"
+            }
+        }
+        
+        stage('Push to DockerHub') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
+                        sh "docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+                    }
+                }
+            }
+        }
+        
+        stage('Update CD Repo') {
+            steps {
+                script {
+                    // Clone the CD repository
+                    sh "git clone https://github.com/gouthamc125/Multi-Tier-BankApp-CD.git"
+                    
+                    dir('Multi-Tier-BankApp-CD') {
+                        // Update the image tag in the deployment manifest
+                        sh """
+                            sed -i 's|image: ${IMAGE_NAME}:.*|image: ${IMAGE_NAME}:${params.IMAGE_TAG}|g' bankapp/bankapp-ds.yml
+                        """
+
+                        // Configure Git, commit, and push the changes
+                        sh """
+                            git config user.name 'jenkins'
+                            git config user.email 'jenkins@example.com'
+                            git add bankapp/bankapp-ds.yml
+                            git commit -m 'Update image tag to ${params.IMAGE_TAG}'
+                            git push origin main
+                        """
+                }
+            }
+        }
+    }
+}
+}
